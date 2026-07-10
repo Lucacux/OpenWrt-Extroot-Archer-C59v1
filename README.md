@@ -1,86 +1,85 @@
 # OpenWrt Extroot — TP-Link Archer C59 v1
 
-Documentación y procedimiento reproducible para habilitar **extroot** (mover el
-`/overlay` a un pendrive USB) en un **TP-Link Archer C59 v1** corriendo
-**OpenWrt 25.12.x**, más el **post-mortem** de por qué se rompió tras un reflash
-y cómo evitarlo en el futuro.
+Reproducible procedure to enable **extroot** (moving `/overlay` to a USB flash
+drive) on a **TP-Link Archer C59 v1** running **OpenWrt 25.12.x**, plus the
+**post-mortem** of why it broke after a reflash and how to avoid it in the future.
 
-> Extroot y **zram** conviven sin problema: son cosas ortogonales. zram es swap
-> comprimido en RAM (`/dev/zram0`); extroot mueve el almacenamiento del overlay
-> al USB. Este procedimiento **no toca** la configuración de zram.
+> Extroot and **zram** coexist with no conflict: they are orthogonal. zram is
+> compressed RAM swap (`/dev/zram0`); extroot moves the overlay *storage* to the
+> USB. This procedure **does not touch** the zram configuration.
 
 ---
 
-## Hardware / entorno
+## Hardware / environment
 
-| Ítem | Valor |
+| Item | Value |
 |---|---|
-| Equipo | TP-Link Archer C59 v1 (`tplink,archer-c59-v1`) |
+| Device | TP-Link Archer C59 v1 (`tplink,archer-c59-v1`) |
 | SoC / target | Qualcomm QCA9563 — `ath79/generic` |
-| RAM | 128 MB (~118 MB útiles) |
-| Flash | 16 MB NOR → overlay interno **~4 MB** (jffs2) |
-| OpenWrt | 25.12.5 (`r33051`), gestor de paquetes **apk** |
-| USB | Pendrive 16 GB, partición única **ext4** |
+| RAM | 128 MB (~118 MB usable) |
+| Flash | 16 MB NOR → internal overlay **~4 MB** (jffs2) |
+| OpenWrt | 25.12.5 (`r33051`), package manager **apk** |
+| USB | 16 GB flash drive, single **ext4** partition |
 
-Con solo ~4 MB de overlay interno, cualquier uso serio (adblock, DoH, logs,
-paquetes extra) llena la flash y la **desgasta**. Extroot resuelve esto llevando
-el overlay a un USB de 16 GB.
+With only ~4 MB of internal overlay, any real workload (adblock, DoH, logs, extra
+packages) fills the flash and **wears it out**. Extroot fixes this by moving the
+overlay to a 16 GB USB drive.
 
 ---
 
-## Post-mortem: por qué extroot dejó de funcionar
+## Post-mortem: why extroot stopped working
 
-Extroot venía funcionando hasta ~fin de mayo. Se rompió y el router quedó
-booteando en los ~4 MB de flash interna. Reconstrucción por fechas de archivos:
+Extroot had been working until ~late May. It broke and the router ended up booting
+on the ~4 MB of internal flash. Timeline reconstructed from file dates:
 
-| Evidencia | Fecha | Interpretación |
+| Evidence | Date | Interpretation |
 |---|---|---|
-| `/rom/etc/openwrt_release`, `/etc/apk/world`, `/sbin/block` | **29-jun** | Se **reflasheó/sysupgradeó** a 25.12.5. |
-| `/etc/config/fstab` | **12-feb** | El fstab quedó **viejo**, preservado del sistema anterior. |
-| overlay del USB (`upper/etc`) | 25-may | Última escritura del extroot viejo antes del corte. |
+| `/rom/etc/openwrt_release`, `/etc/apk/world`, `/sbin/block` | **Jun 29** | Router was **reflashed/sysupgraded** to 25.12.5. |
+| `/etc/config/fstab` | **Feb 12** | The fstab was **stale**, carried over from the previous system. |
+| USB overlay (`upper/etc`) | May 25 | Last write of the old extroot before it stopped. |
 
-**Causa raíz — dos fallas combinadas en `/etc/config/fstab`:**
+**Root cause — two combined faults in `/etc/config/fstab`:**
 
-1. `config mount` de `/overlay` con **`option enabled '0'`** → `block-mount` lo ignora en el boot.
-2. **`option uuid` apuntaba a un USB que ya no existe** (`f839c3e4-…`), mientras que
-   el pendrive actual tiene otro UUID (`ccb76309-…`, reformateado en algún momento).
+1. The `/overlay` `config mount` had **`option enabled '0'`** → `block-mount` skips it at boot.
+2. **`option uuid` pointed to a USB that no longer exists** (`f839c3e4-…`), while the
+   current drive has a different UUID (`ccb76309-…`, reformatted at some point).
 
-Resultado: aunque los paquetes (`block-mount`, `kmod-fs-ext4`, `kmod-usb-storage`,
-`e2fsprogs`) estaban instalados y el USB estaba sano, el sistema **nunca montaba**
-el overlay externo y caía a la flash interna.
+Result: even though the packages (`block-mount`, `kmod-fs-ext4`, `kmod-usb-storage`,
+`e2fsprogs`) were installed and the USB was healthy, the system **never mounted** the
+external overlay and fell back to internal flash.
 
-> **No fue** que otra configuración "pisara" el extroot. Fue un **reflash que dejó
-> un fstab desincronizado** (deshabilitado + UUID de un USB anterior), y las
-> customizaciones no se reaplicaron después del flash.
+> This was **not** a case of one config "overwriting" the extroot. It was a **reflash
+> that left a desynchronized fstab** (disabled + a UUID from a previous USB), and the
+> customizations were never reapplied after the flash.
 
 ---
 
-## Diagnóstico (cómo detectar que extroot NO está activo)
+## Diagnosis (how to tell extroot is NOT active)
 
 ```sh
 df -h /overlay
-# ROTO:   /overlay en /dev/mtdblockX (jffs2), pocos MB
-# OK:     /overlay en /dev/sda1, varios GB
+# BROKEN:  /overlay on /dev/mtdblockX (jffs2), a few MB
+# OK:      /overlay on /dev/sda1, several GB
 
 block info | grep sda1
-# el USB debe figurar con  MOUNT="/overlay"
+# the USB must show  MOUNT="/overlay"
 
-cat /etc/config/fstab      # revisar 'config mount': enabled y uuid
-block info                 # UUID real del USB (debe coincidir con el fstab)
+cat /etc/config/fstab      # check the 'config mount': enabled and uuid
+block info                 # real UUID of the USB (must match the fstab)
 ```
 
 ---
 
-## Solución (procedimiento aplicado)
+## Fix (applied procedure)
 
-> Prerrequisitos (ya presentes en esta imagen): `block-mount`, `kmod-fs-ext4`,
+> Prerequisites (already present in this image): `block-mount`, `kmod-fs-ext4`,
 > `kmod-usb-storage`, `kmod-usb2`, `e2fsprogs`.
 
-Ver `setup-extroot.sh` para el script completo y comentado. Resumen:
+See `setup-extroot.sh` for the full, commented script. Summary:
 
-1. **Backup** de la config (`sysupgrade -b`) y del contenido previo del USB.
-2. **Corregir SOLO la estrofa `config mount`** del fstab con el UUID real del USB
-   y `enabled '1'` (sin tocar `config swap` ni zram):
+1. **Back up** the config (`sysupgrade -b`) and the USB's previous contents.
+2. **Fix ONLY the `config mount` stanza** in fstab with the real USB UUID and
+   `enabled '1'` (without touching `config swap` or zram):
    ```sh
    UUID=$(block info /dev/sda1 | grep -o 'UUID="[^"]*"' | cut -d'"' -f2)
    uci set fstab.@mount[0].target='/overlay'
@@ -88,51 +87,52 @@ Ver `setup-extroot.sh` para el script completo y comentado. Resumen:
    uci set fstab.@mount[0].enabled='1'
    uci commit fstab
    ```
-3. **Poblar el USB con el overlay ACTUAL** (no el viejo, que es de otra versión):
+3. **Populate the USB with the CURRENT overlay** (not the old one, which belongs to
+   a different version):
    ```sh
    mount /dev/sda1 /mnt
-   rm -rf /mnt/upper /mnt/work        # limpia overlay viejo (respaldado antes)
+   rm -rf /mnt/upper /mnt/work        # remove old overlay (backed up beforehand)
    cp -a /overlay/upper /overlay/work /mnt/
    sync && umount /mnt
    ```
-4. **Reboot** y verificar.
+4. **Reboot** and verify.
 
 ---
 
-## Convivencia con zram (importante)
+## Coexistence with zram (important)
 
-Este equipo depende de **zram** para no morir por OOM (128 MB de RAM). Extroot
-**no** interfiere:
+This device relies on **zram** to avoid OOM (128 MB of RAM). Extroot does **not**
+interfere:
 
-- zram = `/dev/zram0`, swap comprimido en RAM (paquete `zram-swap`).
-- extroot = `/overlay` en USB, almacenamiento.
+- zram = `/dev/zram0`, compressed RAM swap (`zram-swap` package).
+- extroot = `/overlay` on USB, storage.
 
-El procedimiento **no modifica** `rc.local`, el paquete `zram-swap`, ni la estrofa
-`config swap` del fstab. Antes y después del cambio, `cat /proc/swaps` debe mostrar
-`/dev/zram0` idéntico.
+The procedure **does not modify** `rc.local`, the `zram-swap` package, or the
+`config swap` stanza in fstab. Before and after the change, `cat /proc/swaps` must
+show `/dev/zram0` unchanged.
 
-> Nota: el fstab traía una entrada huérfana `config swap → /overlay/swap` (el
-> archivo no existe; el `swapon` falla en silencio). Se dejó **sin tocar** para no
-> arriesgar el swap; se puede limpiar aparte si se desea.
-
----
-
-## Cómo evitar que se rompa en el próximo sysupgrade
-
-El overlay externo **no** se conserva en un `sysupgrade`. Para no repetir el corte:
-
-1. **Antes** del sysupgrade: deshabilitar extroot (`uci set fstab.@mount[0].enabled='0'; uci commit fstab`) para bootear limpio en flash interna.
-2. Hacer el sysupgrade **conservando settings**.
-3. **Después**: reinstalar `block-mount` + kmods si faltan, **regenerar el UUID en el fstab con el del USB actual** (¡acá estuvo el bug!), re-poblar el overlay y `enabled '1'`.
-4. Si se reformatea/cambia el pendrive, **siempre** re-leer el UUID con `block info` — nunca asumir el viejo.
+> Note: the fstab carried an orphan `config swap → /overlay/swap` entry (the file
+> does not exist; the `swapon` fails silently). It was left **untouched** to avoid
+> risking swap; it can be cleaned up separately if desired.
 
 ---
 
-## Verificación final (estado OK)
+## How to avoid breaking it on the next sysupgrade
+
+The external overlay is **not** preserved across a `sysupgrade`. To avoid a repeat:
+
+1. **Before** the sysupgrade: disable extroot (`uci set fstab.@mount[0].enabled='0'; uci commit fstab`) so it boots cleanly on internal flash.
+2. Run the sysupgrade **keeping settings**.
+3. **After**: reinstall `block-mount` + kmods if missing, **regenerate the fstab UUID with the current USB's** (this was the bug!), repopulate the overlay, and set `enabled '1'`.
+4. If the drive is reformatted/replaced, **always** re-read the UUID with `block info` — never assume the old one.
+
+---
+
+## Final verification (healthy state)
 
 ```
 /dev/sda1        14.6G   2.3M   13.8G   0%   /overlay
 overlayfs:/overlay ...                        /
 /dev/sda1: UUID="ccb76309-…" MOUNT="/overlay" TYPE="ext4"
-/dev/zram0  partition  81916  0  100         # zram intacto
+/dev/zram0  partition  81916  0  100         # zram untouched
 ```
